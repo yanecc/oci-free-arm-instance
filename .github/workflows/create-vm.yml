@@ -38,59 +38,49 @@ jobs:
 
       - name: Setup OCI CLI and Try to Create VM
         id: create_vm
+        # This forces the job to succeed so the cache will save.
         continue-on-error: true 
         run: |
           set -o pipefail
 
-          # Install OCI CLI
           pip install oci-cli
 
-          # Create Directory
-          mkdir -p /home/runner/.oci
+          mkdir -p ~/.oci
+          echo "${{ secrets.OCI_CLI_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
 
-          # Write Key File
-          echo "${{ secrets.OCI_CLI_KEY_CONTENT }}" > /home/runner/.oci/oci_api_key.pem
-          chmod 600 /home/runner/.oci/oci_api_key.pem
-
-          # Write Config File (Absolute Paths)
-          echo "[DEFAULT]" > /home/runner/.oci/config
-          echo "user=${{ secrets.OCI_CLI_USER }}" >> /home/runner/.oci/config
-          echo "tenancy=${{ secrets.OCI_CLI_TENANCY }}" >> /home/runner/.oci/config
-          echo "fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}" >> /home/runner/.oci/config
-          echo "key_file=/home/runner/.oci/oci_api_key.pem" >> /home/runner/.oci/config
-          echo "region=${{ env.OCI_CLI_REGION }}" >> /home/runner/.oci/config
-          
-          # Write SSH Key
+          echo "[DEFAULT]" > ~/.oci/config
+          echo "user=${{ secrets.OCI_CLI_USER }}" >> ~/.oci/config
+          echo "tenancy=${{ secrets.OCI_CLI_TENANCY }}" >> ~/.oci/config
+          echo "fingerprint=${{ secrets.OCI_CLI_FINGERPRINT }}" >> ~/.oci/config
+          echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
+          echo "region=${{ env.OCI_CLI_REGION }}" >> ~/.oci/config
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
 
-          # Launch VM (50GB Boot Volume to avoid Quota Limits)
+          # Run the command, capture ALL output, and use '|| true' to prevent the script from exiting early.
           OCI_OUTPUT=$(oci compute instance launch \
             --compartment-id "$COMPARTMENT_ID" \
             --availability-domain "$AD_NAME" \
             --shape "VM.Standard.A1.Flex" \
-            --shape-config '{"ocpus":2,"memoryInGBs":12}' \
+            --shape-config '{"ocpus":4,"memoryInGBs":24}' \
             --subnet-id "$SUBNET_ID" \
             --image-id "$IMAGE_ID" \
             --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
             --assign-public-ip true \
-            --display-name "yane" \
-            --boot-volume-size-in-gbs 50 2>&1 || true)
+            --display-name "coolify-vm" \
+            --boot-volume-size-in-gbs 200 2>&1 || true)
 
-          # Store Log for Discord
+          # Store the log as a GitHub step output
           echo "log_data<<EOF" >> $GITHUB_OUTPUT
           echo "$OCI_OUTPUT" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-          # --- SMART CHECK LOGIC ---
+          # Check the log content for an error string.
           if echo "$OCI_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
-            echo "✅ VICTORY! VM is being created."
-            exit 0
-          elif echo "$OCI_OUTPUT" | grep -q 'Out of host capacity'; then
-            echo "⚠️  Oracle is full (Capacity Error). This is expected. Retrying next time..."
-            # We exit with 0 so GitHub does not disable the cron schedule
+            echo "Success! 'PROVISIONING' state found in output."
             exit 0
           else
-            echo "❌ Real Error Detected. Failing the workflow."
+            echo "Error: Success string not found in OCI output. Failing the step."
             exit 1
           fi
 
@@ -99,14 +89,14 @@ jobs:
         uses: sarisia/actions-status-discord@v1.15.4
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          # Set color: Green for Success, Orange for Capacity Wait, Red for Error
+          title: "OCI VM Status: ${{ steps.create_vm.outcome }}"
+          status: ${{ steps.create_vm.outcome }}
           color: ${{ steps.create_vm.outcome == 'success' && '0x28a745' || '0xdc3545' }}
-          title: "OCI Bot Status"
           description: |
-            **Result:**
-            ${{ contains(steps.create_vm.outputs.log_data, 'Out of host capacity') && '⏳ Waiting for Capacity...' || contains(steps.create_vm.outputs.log_data, 'PROVISIONING') && '🚀 VM CREATED! DISABLE WORKFLOW!' || '❌ Error' }}
+            Attempt to create A1.Flex VM.
+            **Status:** `${{ steps.create_vm.outcome }}`
 
-            **Details:**
+            **Log Output:**
             ```json
             ${{ steps.create_vm.outputs.log_data }}
             ```
